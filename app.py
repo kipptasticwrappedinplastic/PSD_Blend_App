@@ -3,6 +3,7 @@ import pandas as pd
 import numpy as np
 from scipy.optimize import minimize
 import plotly.graph_objects as go
+import io
 
 def normalize_psds(psd_df):
     psd_matrix = psd_df.values.astype(float)
@@ -75,9 +76,13 @@ if uploaded_file is not None:
 st.subheader("2. Editable input table")
 if st.session_state.df is None:
     bin_names = [
-        "Coarse (19mm - 75mm)", "Fine (4.75mm - 19mm)", "Coarse (2mm - 4.75mm)",
-        "Medium (0.425mm - 2mm)", "Fine (0.075mm - 0.42mm)",
-        "Silt (0.002mm - 0.075mm)", "Clay (0.0mm - 0.002mm)"
+        "Gravel - Coarse (19mm - 75mm)",
+        "Gravel - Fine (4.75mm - 19mm)",
+        "Sand - Coarse (2mm - 4.75mm)",
+        "Sand - Medium (0.425mm - 2mm)",
+        "Sand - Fine (0.075mm - 0.42mm)",
+        "Silt (0.002mm - 0.075mm)",
+        "Clay (0.0mm - 0.002mm)"
     ]
     data = {"Bin": bin_names, "TARGET": [0.0]*7}
     for i in range(1, 10):
@@ -91,7 +96,7 @@ edited_df = st.data_editor(
     hide_index=True,
     column_config={
         "Bin": st.column_config.TextColumn("Size Bin"),
-        **{col: st.column_config.NumberColumn(col, format="%.2f", min_value=0.0)
+        **{col: st.column_config.NumberColumn(col, format="%.3f", min_value=0.0)
            for col in st.session_state.df.columns if col != "Bin"}
     },
     key="data_editor"
@@ -194,63 +199,96 @@ if st.button("Optimize Blend", type="primary"):
         psd_matrix = normalize_psds(psd_df)
         proportions, sq_error = optimize_blend(psd_matrix, target, max_mixtures)
         achieved = psd_matrix @ proportions
-        
+
+        # Remove tiny fractions (< 0.1%)
+        proportions = np.where(proportions < 0.001, 0.0, proportions)
+        proportions = proportions / proportions.sum() if proportions.sum() > 0 else proportions
+
+        achieved = psd_matrix @ proportions
+
         st.subheader("Optimal proportions")
         prop_df = pd.DataFrame({
             "Aggregate": [st.session_state.nicknames.get(a, a) for a in agg_cols],
-            "Proportion (%)": np.round(proportions * 100, 2)
+            "Proportion (%)": np.round(proportions * 100, 3)
         }).sort_values("Proportion (%)", ascending=False)
         st.dataframe(prop_df, hide_index=True, use_container_width=True)
-        
+
         st.subheader("Achieved PSD")
         result_df = pd.DataFrame({
             "Bin": bin_list,
-            "Target (%)": np.round(target, 2),
-            "Achieved (%)": np.round(achieved, 2),
-            "Difference (%)": np.round(achieved - target, 2)
+            "Target (%)": np.round(target, 3),
+            "Achieved (%)": np.round(achieved, 3),
+            "Difference (%)": np.round(achieved - target, 3)
         })
         st.dataframe(result_df, hide_index=True, use_container_width=True)
-        
+
         st.subheader("Performance metrics")
         sad, mad = compute_errors(achieved, target)
         c1, c2, c3 = st.columns(3)
         with c1: st.metric("Squared error", f"{sq_error:.4f}")
-        with c2: st.metric("SAD (total)", f"{sad:.2f} %")
-        with c3: st.metric("MAD (average)", f"{mad:.2f} %")
-        
+        with c2: st.metric("SAD (total)", f"{sad:.3f} %")
+        with c3: st.metric("MAD (average)", f"{mad:.3f} %")
+
         used = np.sum(proportions > 1e-5)
         st.info(f"Used {used} aggregates (out of {len(agg_cols)} available)")
-        
+
         st.subheader("Performance Range Chart")
         fig = go.Figure()
-        
+
         sad_color = 'blue' if sad <= 6 else 'green' if sad <= 9 else 'yellow' if sad <= 12 else 'red'
         mad_color = 'blue' if mad <= 1.5 else 'green' if mad <= 2.5 else 'yellow' if mad <= 3.5 else 'red'
-        
+
         sad_level = "Ideal" if sad <= 6 else "Acceptable" if sad <= 9 else "Marginal" if sad <= 12 else "Unacceptable"
         mad_level = "Ideal" if mad <= 1.5 else "Acceptable" if mad <= 2.5 else "Marginal" if mad <= 3.5 else "Unacceptable"
-        
+
         fig.add_trace(go.Bar(y=['SAD'], x=[sad], orientation='h', marker=dict(color=sad_color),
-                             text=[f"{sad:.2f} %"], textposition='auto'))
+                             text=[f"{sad:.3f} %"], textposition='auto'))
         fig.add_trace(go.Bar(y=['MAD'], x=[mad], orientation='h', marker=dict(color=mad_color),
-                             text=[f"{mad:.2f} %"], textposition='auto'))
-        
-        fig.add_annotation(x=sad + 1, y=0, text=sad_level, showarrow=False,
-                           font=dict(size=12, color=sad_color), xanchor="left")
-        fig.add_annotation(x=mad + 1, y=1, text=mad_level, showarrow=False,
-                           font=dict(size=12, color=mad_color), xanchor="left")
-        
+                             text=[f"{mad:.3f} %"], textposition='auto'))
+
+        # Colored dotted lines (limited to each bar)
+        for th in [6, 9, 12]:
+            fig.add_shape(type="line", x0=th, x1=th, y0=-0.4, y1=0.4,
+                          line=dict(color=sad_color, width=2, dash="dash"))
+        for th in [1.5, 2.5, 3.5]:
+            fig.add_shape(type="line", x0=th, x1=th, y0=0.6, y1=1.4,
+                          line=dict(color=mad_color, width=2, dash="dash"))
+
+        fig.add_annotation(x=sad + 2, y=0, text=sad_level, showarrow=False,
+                           font=dict(size=13, color=sad_color), xanchor="left")
+        fig.add_annotation(x=mad + 2, y=1, text=mad_level, showarrow=False,
+                           font=dict(size=13, color=mad_color), xanchor="left")
+
         fig.update_layout(
             title="SAD and MAD vs Performance Ranges",
             xaxis_title="Value (%)",
             yaxis=dict(tickmode='array', tickvals=[0, 1], ticktext=['SAD', 'MAD']),
-            height=350,
+            height=380,
             showlegend=False,
-            xaxis=dict(range=[0, max(sad, mad, 15) + 5])
+            xaxis=dict(range=[0, max(sad, mad, 15) + 8])
         )
         st.plotly_chart(fig, use_container_width=True)
-        
-        st.download_button("Download results as CSV", result_df.to_csv(index=False),
-                           file_name="optimized_blend.csv", mime="text/csv")
+
+        # Excel export
+        buffer = io.BytesIO()
+        with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
+            st.session_state.df.to_excel(writer, sheet_name="Input Table", index=False)
+            prop_df.to_excel(writer, sheet_name="Optimal Proportions", index=False)
+            result_df.to_excel(writer, sheet_name="Achieved PSD", index=False)
+            
+            summary = pd.DataFrame({
+                "Metric": ["Squared Error", "SAD (total) %", "MAD (average) %", "Aggregates Used"],
+                "Value": [round(sq_error, 4), round(sad, 3), round(mad, 3), int(used)]
+            })
+            summary.to_excel(writer, sheet_name="Summary", index=False)
+
+        buffer.seek(0)
+        st.download_button(
+            label="Download full results as Excel (.xlsx)",
+            data=buffer.getvalue(),
+            file_name="optimized_blend_results.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+
     except Exception as e:
         st.error(f"Error: {str(e)}")
