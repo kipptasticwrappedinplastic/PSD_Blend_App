@@ -1,3 +1,19 @@
+# =====================================================
+# PSD Blend Optimizer - Version 7
+# =====================================================
+#
+# Revisions from previous versions:
+# 1. When creating a sieved mixture, the column is now automatically renormalized to sum to exactly 100%.
+# 2. Nickname input table is now horizontal (same layout/orientation as the main editable table).
+# 3. Bin names permanently include "Gravel -" and "Sand -" prefixes.
+# 4. All numeric displays use 3 decimal places (%.3f).
+# 5. Performance Range Chart has colored dotted lines limited to each bar + level labels.
+# 6. Download button now exports a full Excel file with 4 sheets (Input Table, Optimal Proportions, Achieved PSD, Summary).
+# 7. Tiny fractions (< 0.1%) are automatically forced to zero.
+#
+# Last updated: February 26, 2026
+# =====================================================
+
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -145,6 +161,9 @@ if agg_options:
             for bin_name in sieve_bins:
                 idx = st.session_state.df[st.session_state.df["Bin"] == bin_name].index[0]
                 new_col[idx] = 0.0
+            # Renormalize to 100%
+            if new_col.sum() > 0:
+                new_col = new_col / new_col.sum() * 100
             st.session_state.df[sieve_name] = new_col
             st.rerun()
 
@@ -172,23 +191,23 @@ max_mixtures = st.number_input("Maximum number of mixtures allowed (0 = no limit
 
 st.subheader("7. Aggregate Nicknames")
 agg_cols_current = [col for col in st.session_state.df.columns if col not in ["Bin", "TARGET"]]
-for col in agg_cols_current:
-    if col not in st.session_state.nicknames:
-        st.session_state.nicknames[col] = col[:30]
-nick_df = pd.DataFrame({
-    "Column": list(st.session_state.nicknames.keys()),
-    "Nickname": [st.session_state.nicknames[c] for c in st.session_state.nicknames]
-})
+nick_data = {
+    "Aggregate": agg_cols_current,
+    "Nickname": [st.session_state.nicknames.get(col, col[:30]) for col in agg_cols_current]
+}
+nick_df = pd.DataFrame(nick_data)
+
 edited_nick_df = st.data_editor(
     nick_df,
     hide_index=True,
     column_config={
-        "Column": st.column_config.TextColumn("Column Name", disabled=True),
+        "Aggregate": st.column_config.TextColumn("Aggregate", disabled=True),
         "Nickname": st.column_config.TextColumn("Nickname (for results)")
     }
 )
+
 for _, row in edited_nick_df.iterrows():
-    st.session_state.nicknames[row["Column"]] = row["Nickname"]
+    st.session_state.nicknames[row["Aggregate"]] = row["Nickname"]
 
 if st.button("Optimize Blend", type="primary"):
     try:
@@ -203,7 +222,6 @@ if st.button("Optimize Blend", type="primary"):
         # Remove tiny fractions (< 0.1%)
         proportions = np.where(proportions < 0.001, 0.0, proportions)
         proportions = proportions / proportions.sum() if proportions.sum() > 0 else proportions
-
         achieved = psd_matrix @ proportions
 
         st.subheader("Optimal proportions")
@@ -234,10 +252,8 @@ if st.button("Optimize Blend", type="primary"):
 
         st.subheader("Performance Range Chart")
         fig = go.Figure()
-
         sad_color = 'blue' if sad <= 6 else 'green' if sad <= 9 else 'yellow' if sad <= 12 else 'red'
         mad_color = 'blue' if mad <= 1.5 else 'green' if mad <= 2.5 else 'yellow' if mad <= 3.5 else 'red'
-
         sad_level = "Ideal" if sad <= 6 else "Acceptable" if sad <= 9 else "Marginal" if sad <= 12 else "Unacceptable"
         mad_level = "Ideal" if mad <= 1.5 else "Acceptable" if mad <= 2.5 else "Marginal" if mad <= 3.5 else "Unacceptable"
 
@@ -246,7 +262,6 @@ if st.button("Optimize Blend", type="primary"):
         fig.add_trace(go.Bar(y=['MAD'], x=[mad], orientation='h', marker=dict(color=mad_color),
                              text=[f"{mad:.3f} %"], textposition='auto'))
 
-        # Colored dotted lines (limited to each bar)
         for th in [6, 9, 12]:
             fig.add_shape(type="line", x0=th, x1=th, y0=-0.4, y1=0.4,
                           line=dict(color=sad_color, width=2, dash="dash"))
@@ -275,7 +290,6 @@ if st.button("Optimize Blend", type="primary"):
             st.session_state.df.to_excel(writer, sheet_name="Input Table", index=False)
             prop_df.to_excel(writer, sheet_name="Optimal Proportions", index=False)
             result_df.to_excel(writer, sheet_name="Achieved PSD", index=False)
-            
             summary = pd.DataFrame({
                 "Metric": ["Squared Error", "SAD (total) %", "MAD (average) %", "Aggregates Used"],
                 "Value": [round(sq_error, 4), round(sad, 3), round(mad, 3), int(used)]
